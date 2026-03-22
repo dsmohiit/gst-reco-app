@@ -104,6 +104,54 @@ def _build_file_token(uploaded_file, skip_rows: int) -> str:
     return f"{uploaded_file.name}:{getattr(uploaded_file, 'size', 0)}:{skip_rows}"
 
 
+def _build_files_token(uploaded_files) -> str:
+    return "|".join(
+        f"{uploaded_file.name}:{getattr(uploaded_file, 'size', 0)}"
+        for uploaded_file in uploaded_files
+    )
+
+
+def _make_unique_source_file_name(file_name: str, seen_names: dict[str, int], file_index: int) -> str:
+    current_count = seen_names.get(file_name, 0) + 1
+    seen_names[file_name] = current_count
+    if current_count == 1:
+        return file_name
+    return f"{file_name} ({file_index})"
+
+
+def _load_gstr2b_files(uploaded_files) -> tuple[pd.DataFrame, list[dict[str, object]], int]:
+    loaded_frames: list[pd.DataFrame] = []
+    file_summaries: list[dict[str, object]] = []
+    seen_names: dict[str, int] = {}
+    total_rows = 0
+
+    for file_index, uploaded_file in enumerate(uploaded_files, start=1):
+        uploaded_file.seek(0)
+        raw_df = load_input_file(uploaded_file, skiprows=None)
+        source_file_name = _make_unique_source_file_name(uploaded_file.name, seen_names, file_index)
+        raw_df = raw_df.copy()
+        raw_df["source_file"] = source_file_name
+        loaded_frames.append(raw_df)
+        total_rows += len(raw_df)
+        file_summaries.append(
+            {
+                "display_name": source_file_name,
+                "rows": int(len(raw_df)),
+                "header_row": int(raw_df.attrs.get("detected_header_row", 0)),
+                "auto_detected": bool(raw_df.attrs.get("header_auto_detected", False)),
+            }
+        )
+
+    if not loaded_frames:
+        raise InputMappingError("No GSTR-2B files could be loaded.")
+
+    combined_df = pd.concat(loaded_frames, axis=0, ignore_index=True, sort=False)
+    if combined_df.empty:
+        raise InputMappingError("Combined GSTR-2B data is empty. Please check the uploaded files.")
+
+    return combined_df, file_summaries, total_rows
+
+
 def _initialize_header_detection_state(dataset_key: str, uploaded_file) -> None:
     st.session_state.setdefault("header_detection_tokens", {})
     st.session_state.setdefault("header_detection_results", {})
@@ -169,7 +217,10 @@ def _render_mapping_status(purchase_inspection, purchase_mapping, gstr2b_inspect
 
 def _render_mapping_editor(title: str, dataset_key: str, inspection_result) -> dict[str, str | None]:
     mapping = _get_mapping_state(dataset_key)
-    available_columns = inspection_result.dataframe.columns.tolist()
+    available_columns = [
+        column for column in inspection_result.dataframe.columns.tolist()
+        if not str(column).startswith("_") and str(column) != "source_file"
+    ]
     st.markdown(f"#### {title}")
 
     for field, label in DISPLAY_FIELD_LABELS.items():
@@ -218,6 +269,17 @@ def _process_mapped_dataframe(df, mapping):
     standardized_df["Purchase Value"] = pd.to_numeric(standardized_df["Purchase Value"], errors="coerce").fillna(0)
     standardized_df["Invoice Number"] = standardized_df["Invoice Number"].fillna("").astype(str)
     standardized_df["GSTIN"] = standardized_df["GSTIN"].fillna("").astype(str)
+    if "source_file" in standardized_df.columns:
+        standardized_df["source_file"] = standardized_df["source_file"].fillna("").astype(str)
+    return standardized_df
+
+
+def _prepare_gstr2b_dataframe(df: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame:
+    standardized_df = _process_mapped_dataframe(df, mapping)
+    dedupe_subset = ["GSTIN", "Invoice Number", "Purchase Value"]
+    standardized_df = standardized_df.drop_duplicates(subset=dedupe_subset, keep="first").reset_index(drop=True)
+    if standardized_df.empty:
+        raise InputMappingError("Combined GSTR-2B data is empty after deduplication. Please check the uploaded files.")
     return standardized_df
 
 
@@ -260,14 +322,18 @@ with st.expander("Status Legend", expanded=False):
 with st.sidebar:
     st.header("Inputs")
     purchase_file = st.file_uploader("Upload Purchase Register", type=["csv", "xlsx", "xls"])
-    gstr2b_file = st.file_uploader("Upload GSTR-2B", type=["csv", "xlsx", "xls"])
+    gstr2b_files = st.file_uploader(
+        "Upload GSTR-2B Files",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=True,
+    )
 
     _warn_for_file_size(purchase_file)
-    _warn_for_file_size(gstr2b_file)
+    for gstr2b_file in gstr2b_files:
+        _warn_for_file_size(gstr2b_file)
 
     try:
         _initialize_header_detection_state("purchase", purchase_file)
-        _initialize_header_detection_state("gstr2b", gstr2b_file)
     except InputMappingError as exc:
         st.error(str(exc))
         st.stop()
@@ -283,14 +349,7 @@ with st.sidebar:
         key="purchase_skip_rows",
         help="Use this if the file has extra title rows or merged header rows.",
     )
-    gstr2b_skip_rows = st.number_input(
-        "Skip top rows (GSTR-2B)",
-        min_value=0,
-        max_value=25,
-        step=1,
-        key="gstr2b_skip_rows",
-        help="Use this if the file has extra title rows or merged header rows.",
-    )
+    st.caption("GSTR-2B header rows are auto-detected separately for each uploaded file.")
 
     st.header("Tolerance Controls")
     value_tolerance = st.slider("Value tolerance (Rs.)", min_value=1, max_value=20, value=2, step=1)
@@ -300,27 +359,24 @@ with st.sidebar:
     st.header("Filters")
     mismatches_only = st.checkbox("Show only mismatches")
     only_itc_risk = st.checkbox("Show only ITC risk")
+    only_timing_differences = st.checkbox("Show only Timing Differences")
 
     run_reconciliation = st.button(
         "Run Reconciliation",
         type="primary",
         use_container_width=True,
-        disabled=(purchase_file is None or gstr2b_file is None),
+        disabled=(purchase_file is None or not gstr2b_files),
     )
 
 
-if purchase_file is None or gstr2b_file is None:
+if purchase_file is None or not gstr2b_files:
     st.info("Upload both files to enable reconciliation.")
     st.stop()
 
 purchase_header_info = st.session_state.get("header_detection_results", {}).get("purchase", {"row": 0, "score": 0})
-gstr2b_header_info = st.session_state.get("header_detection_results", {}).get("gstr2b", {"row": 0, "score": 0})
 
 if purchase_header_info.get("score", 0) == 0:
     st.warning("Could not auto-detect header for Purchase Register. Please select manually.")
-
-if gstr2b_header_info.get("score", 0) == 0:
-    st.warning("Could not auto-detect header for GSTR-2B. Please select manually.")
 
 try:
     with st.spinner("Reading uploaded files..."):
@@ -329,18 +385,18 @@ try:
             if purchase_header_info.get("score", 0) > 0 and int(purchase_skip_rows) == int(purchase_header_info["row"])
             else int(purchase_skip_rows)
         )
-        gstr2b_skip_param = (
-            None
-            if gstr2b_header_info.get("score", 0) > 0 and int(gstr2b_skip_rows) == int(gstr2b_header_info["row"])
-            else int(gstr2b_skip_rows)
-        )
 
         purchase_raw_df = load_input_file(purchase_file, skiprows=purchase_skip_param)
-        gstr2b_raw_df = load_input_file(gstr2b_file, skiprows=gstr2b_skip_param)
+        gstr2b_raw_df, gstr2b_file_summaries, gstr2b_total_rows = _load_gstr2b_files(gstr2b_files)
         if purchase_raw_df.attrs.get("header_auto_detected"):
             st.toast(f"🎯 Auto-detected header at row {purchase_raw_df.attrs.get('detected_header_row', 0)}", icon="✅")
-        if gstr2b_raw_df.attrs.get("header_auto_detected"):
-            st.toast(f"🎯 Auto-detected header at row {gstr2b_raw_df.attrs.get('detected_header_row', 0)}", icon="✅")
+        for file_summary in gstr2b_file_summaries:
+            if file_summary["auto_detected"]:
+                st.toast(
+                    f"🎯 Auto-detected header at row {file_summary['header_row']} for {file_summary['display_name']}",
+                    icon="✅",
+                )
+        st.toast(f"✅ {len(gstr2b_files)} GSTR-2B files merged successfully.", icon="✅")
         purchase_inspection = inspect_input_dataframe(purchase_raw_df)
         gstr2b_inspection = inspect_input_dataframe(gstr2b_raw_df)
 except InputMappingError as exc:
@@ -350,9 +406,16 @@ except Exception as exc:
     st.error(f"Error: {str(exc)}")
     st.stop()
 
+with st.sidebar:
+    st.success(f"✅ {len(gstr2b_file_summaries)} files loaded (Total {gstr2b_total_rows:,} rows).")
+    for file_summary in gstr2b_file_summaries:
+        st.caption(f"{file_summary['display_name']} - {file_summary['rows']:,} rows")
+    if gstr2b_total_rows > 50000:
+        st.warning("Large dataset detected. Processing may take a moment.")
+
 mapping_left, mapping_right = st.columns(2)
 purchase_token = _build_file_token(purchase_file, int(purchase_skip_rows))
-gstr2b_token = _build_file_token(gstr2b_file, int(gstr2b_skip_rows))
+gstr2b_token = _build_files_token(gstr2b_files)
 _initialize_mapping_state("purchase", purchase_inspection, purchase_token)
 _initialize_mapping_state("gstr2b", gstr2b_inspection, gstr2b_token)
 purchase_mapping = _get_mapping_state("purchase")
@@ -378,7 +441,7 @@ if not run_reconciliation:
     preview_gstr2b_df = None
     try:
         preview_purchase_df = _process_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
-        preview_gstr2b_df = _process_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
+        preview_gstr2b_df = _prepare_gstr2b_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
     except InputMappingError as exc:
         preview_error = str(exc)
     except Exception:
@@ -400,7 +463,7 @@ if not run_reconciliation:
 
 try:
     purchase_df = _process_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
-    gstr2b_df = _process_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
+    gstr2b_df = _prepare_gstr2b_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
 except InputMappingError as exc:
     _show_processing_message(str(exc))
     st.stop()
@@ -451,7 +514,11 @@ follow_up_df = build_follow_up_sheet(reconciliation_df)
 processing_log = reconciliation_df.attrs.get("processing_log", {})
 
 exception_mask = reconciliation_df["Status"] != "MATCHED"
-if mismatches_only:
+if only_timing_differences:
+    reconciliation_view = reconciliation_export_df[
+        reconciliation_export_df["Reason"] == "Matched (Timing Difference)"
+    ].copy()
+elif mismatches_only:
     reconciliation_view = reconciliation_export_df[exception_mask.values].copy()
 else:
     reconciliation_view = reconciliation_export_df.copy()
@@ -475,11 +542,12 @@ st.dataframe(
     height=320,
 )
 
-metric_columns = st.columns(4)
+metric_columns = st.columns(5)
 metric_columns[0].metric("Total Invoices", f"{summary_metrics['total_invoices']:,}")
 metric_columns[1].metric("Matched %", f"{summary_metrics['matched_percentage']:.2f}%")
 metric_columns[2].metric("Potential ITC Risk", f"Rs. {summary_metrics['itc_at_risk_amount']:,.2f}")
-metric_columns[3].metric("Missing Invoices", f"{summary_metrics['missing_invoices_count']:,}")
+metric_columns[3].metric("Timing Differences", f"{summary_metrics['timing_differences_count']:,}")
+metric_columns[4].metric("Missing Invoices", f"{summary_metrics['missing_invoices_count']:,}")
 
 with st.expander("Processing Log", expanded=False):
     st.write(

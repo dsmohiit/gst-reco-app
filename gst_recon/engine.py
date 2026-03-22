@@ -89,6 +89,7 @@ EXPORT_COLUMNS = [
     "Invoice Number",
     "Purchase Date",
     "2B Date",
+    "source_file",
     "Status",
     "ITC Status",
     "Purchase Value",
@@ -188,6 +189,10 @@ def clean_invoice_data(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     cleaned["invoice_number"] = _clean_text_series(cleaned["invoice_number"])
     cleaned["invoice_number_normalized"] = _normalize_invoice_number(cleaned["invoice_number"])
     cleaned["source"] = source_name
+    if "source_file" in cleaned.columns:
+        cleaned["source_file_name"] = _clean_text_series(cleaned["source_file"]).replace("", source_name)
+    else:
+        cleaned["source_file_name"] = source_name
     cleaned["source_row_id"] = np.arange(len(cleaned), dtype=int)
     cleaned["key"] = cleaned["gstin"] + "|" + cleaned["invoice_number_normalized"]
 
@@ -278,6 +283,14 @@ def generate_explanation(row: pd.Series) -> str:
         return "This invoice needs manual review before any compliance action is taken."
     if reason == "Invoice uploaded in different period":
         return "Invoice dates differ beyond the configured tolerance and may belong to a different filing period."
+    if reason == "Matched (Timing Difference)":
+        purchase_date = row.get("Purchase Date")
+        gstr2b_date = row.get("2B Date")
+        source_file = str(row.get("source_file", "")).strip() or str(row.get("2B Source File", "")).strip() or "the uploaded GSTR-2B file"
+        filing_month = f"{gstr2b_date:%B %Y}" if pd.notna(gstr2b_date) else "the matched period"
+        if pd.notna(purchase_date):
+            return f"Invoice dated {purchase_date:%d-%m-%Y} found in GSTR-2B for {filing_month} ({source_file})."
+        return f"Invoice found in GSTR-2B for {filing_month} ({source_file})."
     return "No issue detected"
 
 
@@ -312,6 +325,19 @@ def generate_action(row: pd.Series) -> str:
 
 def _is_exception(df: pd.DataFrame) -> pd.Series:
     return df["Status"].ne("MATCHED") | df["Duplicate Flag"].fillna(False)
+
+
+def _resolve_final_vendor_name(row: pd.Series) -> str:
+    purchase_vendor = str(row.get("Purchase Supplier Name", "") or "").strip()
+    gstr2b_vendor = str(row.get("2B Supplier Name", "") or "").strip()
+    supplier_name = str(row.get("Supplier Name", "") or "").strip()
+    status = str(row.get("Status", "") or "").strip()
+
+    if status == "MISSING_IN_2B":
+        return purchase_vendor or supplier_name or gstr2b_vendor
+    if status == "ONLY_IN_2B":
+        return gstr2b_vendor or supplier_name or purchase_vendor
+    return purchase_vendor or gstr2b_vendor or supplier_name
 
 
 def _select_best_matches(
@@ -453,6 +479,12 @@ def _classify_match(row: pd.Series, config: ReconciliationConfig) -> Tuple[str, 
     return "MATCHED", "Matched within configured tolerances"
 
 
+def _is_timing_difference(left_date: pd.Timestamp, right_date: pd.Timestamp) -> bool:
+    if pd.isna(left_date) or pd.isna(right_date):
+        return False
+    return (left_date.year, left_date.month) != (right_date.year, right_date.month)
+
+
 def _build_source_output_row(
     row: pd.Series,
     status: str,
@@ -467,7 +499,10 @@ def _build_source_output_row(
         "GSTIN": row["gstin"],
         "Purchase GSTIN": row["gstin"] if is_purchase else "",
         "2B GSTIN": row["gstin"] if not is_purchase else "",
+        "Purchase Supplier Name": row["supplier_name"] if is_purchase else "",
+        "2B Supplier Name": row["supplier_name"] if not is_purchase else "",
         "Supplier Name": row["supplier_name"],
+        "Final Vendor Name": row["supplier_name"],
         "Invoice Number": row["invoice_number"],
         "Purchase Invoice Number": row["invoice_number"] if is_purchase else "",
         "2B Invoice Number": row["invoice_number"] if not is_purchase else "",
@@ -484,11 +519,16 @@ def _build_source_output_row(
         "Duplicate Flag": bool(row.get("duplicate_flag", False)),
         "Match Stage": match_stage,
         "Source": row["source"],
+        "source_file": row.get("source_file_name", "") if not is_purchase else "",
+        "Purchase Source File": row.get("source_file_name", "") if is_purchase else "",
+        "2B Source File": row.get("source_file_name", "") if not is_purchase else "",
     }
 
 
 def _build_match_output_row(row: pd.Series, config: ReconciliationConfig) -> Dict[str, object]:
     status, reason = _classify_match(row, config)
+    if status == "MATCHED" and _is_timing_difference(row["invoice_date_pr"], row["invoice_date_2b"]):
+        reason = "Matched (Timing Difference)"
     purchase_value = float(row["taxable_value_pr"])
     gstr2b_value = float(row["taxable_value_2b"])
 
@@ -496,7 +536,10 @@ def _build_match_output_row(row: pd.Series, config: ReconciliationConfig) -> Dic
         "GSTIN": row["gstin_pr"],
         "Purchase GSTIN": row["gstin_pr"],
         "2B GSTIN": row["gstin_2b"],
+        "Purchase Supplier Name": row["supplier_name_pr"],
+        "2B Supplier Name": row["supplier_name_2b"],
         "Supplier Name": row["supplier_name_pr"] or row["supplier_name_2b"],
+        "Final Vendor Name": row["supplier_name_pr"] or row["supplier_name_2b"],
         "Invoice Number": row["invoice_number_pr"] or row["invoice_number_2b"],
         "Purchase Invoice Number": row["invoice_number_pr"],
         "2B Invoice Number": row["invoice_number_2b"],
@@ -513,6 +556,9 @@ def _build_match_output_row(row: pd.Series, config: ReconciliationConfig) -> Dic
         "Duplicate Flag": False,
         "Match Stage": row["match_stage"],
         "Source": "Reconciled",
+        "source_file": row.get("source_file_name_2b", "GSTR-2B"),
+        "Purchase Source File": row.get("source_file_name_pr", "Purchase Register"),
+        "2B Source File": row.get("source_file_name_2b", "GSTR-2B"),
     }
 
 
@@ -760,6 +806,9 @@ def reconcile_invoices(
     for column in ["Purchase Value", "2B Value", "Difference"]:
         reconciliation_df[column] = reconciliation_df[column].fillna(0.0).round(2)
 
+    reconciliation_df["Final Vendor Name"] = reconciliation_df.apply(_resolve_final_vendor_name, axis=1)
+    reconciliation_df["Supplier Name"] = reconciliation_df["Final Vendor Name"]
+
     reconciliation_df["ITC Status"] = reconciliation_df.apply(assign_itc_status, axis=1)
     invalid_rows = reconciliation_df[
         (reconciliation_df["Status"] == "DATE ERROR")
@@ -797,6 +846,7 @@ def build_summary_metrics(reconciliation_df: pd.DataFrame) -> Dict[str, float]:
             "matched_percentage": 0.0,
             "itc_at_risk_amount": 0.0,
             "missing_invoices_count": 0,
+            "timing_differences_count": 0,
         }
 
     base_scope = reconciliation_df[reconciliation_df["Status"] != "ONLY_IN_2B"].copy()
@@ -804,12 +854,14 @@ def build_summary_metrics(reconciliation_df: pd.DataFrame) -> Dict[str, float]:
     matched_percentage = float((base_scope["Status"] == "MATCHED").mean() * 100) if total_invoices else 0.0
     itc_risk_summary = build_itc_risk_summary(reconciliation_df)
     missing_invoices_count = int((reconciliation_df["Status"] == "MISSING_IN_2B").sum())
+    timing_differences_count = int((reconciliation_df["Reason"] == "Matched (Timing Difference)").sum())
 
     return {
         "total_invoices": total_invoices,
         "matched_percentage": round(matched_percentage, 2),
         "itc_at_risk_amount": itc_risk_summary["itc_at_risk_amount"],
         "missing_invoices_count": missing_invoices_count,
+        "timing_differences_count": timing_differences_count,
     }
 
 
@@ -860,18 +912,24 @@ def generate_vendor_summary(reconciliation_df: pd.DataFrame) -> pd.DataFrame:
 
     working_df = reconciliation_df.copy()
     working_df["GSTIN"] = working_df["GSTIN"].fillna("").astype(str)
-    working_df["Supplier Name"] = working_df["Supplier Name"].fillna("").astype(str).str.strip()
+    working_df["Final Vendor Name"] = (
+        working_df.get("Final Vendor Name", working_df.get("Supplier Name", ""))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    working_df.loc[working_df["Final Vendor Name"].eq(""), "Final Vendor Name"] = "Unknown Vendor"
     risk_view = build_itc_risk_view(working_df)
     vendor_risk = (
-        risk_view.groupby(["GSTIN", "Supplier Name"], dropna=False)["Risk Amount"]
+        risk_view.groupby(["GSTIN", "Final Vendor Name"], dropna=False)["Risk Amount"]
         .sum()
         .reset_index(name="ITC At Risk")
         if not risk_view.empty
-        else pd.DataFrame(columns=["GSTIN", "Supplier Name", "ITC At Risk"])
+        else pd.DataFrame(columns=["GSTIN", "Final Vendor Name", "ITC At Risk"])
     )
 
     summary = (
-        working_df.groupby(["GSTIN", "Supplier Name"], dropna=False)
+        working_df.groupby(["GSTIN", "Final Vendor Name"], dropna=False)
         .agg(
             total_invoices=("Invoice Number", "count"),
             matched_invoices=("Status", lambda x: (x == "MATCHED").sum()),
@@ -879,14 +937,14 @@ def generate_vendor_summary(reconciliation_df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
         .rename(
             columns={
-                "Supplier Name": "Vendor Name",
+                "Final Vendor Name": "Vendor Name",
                 "total_invoices": "Total Invoices",
                 "matched_invoices": "Matched Invoices",
             }
         )
     )
 
-    vendor_risk = vendor_risk.rename(columns={"Supplier Name": "Vendor Name"})
+    vendor_risk = vendor_risk.rename(columns={"Final Vendor Name": "Vendor Name"})
     summary = summary.merge(vendor_risk, on=["GSTIN", "Vendor Name"], how="left")
     summary["ITC At Risk"] = summary["ITC At Risk"].fillna(0.0).round(2)
     summary["Compliance Score"] = (

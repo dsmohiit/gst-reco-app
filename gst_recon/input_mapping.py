@@ -51,11 +51,18 @@ class InputMappingResult:
 
 
 def _sanitize_column_names(columns: Sequence[object]) -> List[str]:
-    sanitized = [
-        re.sub(r"[^a-z0-9\s]", "", str(col).lower().strip())
-        for col in columns
-    ]
-    sanitized = [re.sub(r"\s+", " ", col).strip() for col in sanitized]
+    sanitized: List[str] = []
+    for col in columns:
+        column_name = str(col).strip().lower()
+        compact_name = re.sub(r"[^a-z0-9_]", "", column_name)
+        if column_name.startswith("_") or compact_name in {"source_file", "sourcefile"}:
+            if compact_name in {"source_file", "sourcefile"}:
+                sanitized.append("source_file")
+            else:
+                sanitized.append(re.sub(r"\s+", " ", column_name).strip())
+            continue
+        cleaned = re.sub(r"[^a-z0-9\s]", "", column_name)
+        sanitized.append(re.sub(r"\s+", " ", cleaned).strip())
     return sanitized
 
 
@@ -231,7 +238,11 @@ def build_column_mapping(
 
 def inspect_input_dataframe(df: pd.DataFrame) -> InputMappingResult:
     cleaned = preprocess_input_dataframe(df)
-    mapping, ambiguous, confidence, review_required = build_column_mapping(cleaned.columns.tolist())
+    candidate_columns = [
+        column for column in cleaned.columns.tolist()
+        if not str(column).startswith("_") and str(column) != "source_file"
+    ]
+    mapping, ambiguous, confidence, review_required = build_column_mapping(candidate_columns)
     return InputMappingResult(
         dataframe=cleaned,
         suggested_mapping=mapping,
@@ -326,6 +337,14 @@ def prepare_data(df: pd.DataFrame, mapping: Dict[str, str | None]) -> pd.DataFra
             "Normalized Invoice Number": working_df["norm_inv_no"],
         }
     )
+
+    if "source_file" in working_df.columns:
+        standardized["source_file"] = (
+            working_df["source_file"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
 
     if standardized.empty:
         return standardized.copy()
