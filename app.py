@@ -178,6 +178,33 @@ def _render_preview(title: str, standardized_df: pd.DataFrame) -> None:
     st.dataframe(standardized_df[preview_columns].head(), use_container_width=True, height=220)
 
 
+def _process_mapped_dataframe(df, mapping):
+    standardized_df = standardize_mapped_dataframe(df, mapping)
+    if standardized_df.empty:
+        raise InputMappingError("The mapped columns resulted in an empty dataset. Please check your mapping.")
+    standardized_df["Purchase Value"] = pd.to_numeric(standardized_df["Purchase Value"], errors="coerce").fillna(0)
+    standardized_df["Invoice Number"] = standardized_df["Invoice Number"].fillna("").astype(str)
+    standardized_df["GSTIN"] = standardized_df["GSTIN"].fillna("").astype(str)
+    return standardized_df
+
+
+def _run_reconciliation(purchase_df: pd.DataFrame, gstr2b_df: pd.DataFrame, value_tolerance: int, date_tolerance: int, fuzzy_threshold: float):
+    return reconcile_invoices(
+        purchase_df,
+        gstr2b_df,
+        value_tolerance=value_tolerance,
+        date_tolerance_days=date_tolerance,
+        fuzzy_threshold=fuzzy_threshold,
+    )
+
+
+def _show_processing_message(message: str) -> None:
+    if message == "The mapped columns resulted in an empty dataset. Please check your mapping.":
+        st.warning(message)
+    else:
+        st.error(f"Error: {message}")
+
+
 st.title("GST Reconciliation Assistant")
 st.warning(
     "This tool provides automated insights. Please review results before making financial or compliance decisions."
@@ -252,8 +279,8 @@ try:
 except InputMappingError as exc:
     st.error(str(exc))
     st.stop()
-except Exception:
-    st.error("Error processing file. Please check format.")
+except Exception as exc:
+    st.error(f"Error: {str(exc)}")
     st.stop()
 
 mapping_left, mapping_right = st.columns(2)
@@ -283,15 +310,15 @@ if not run_reconciliation:
     preview_purchase_df = None
     preview_gstr2b_df = None
     try:
-        preview_purchase_df = standardize_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
-        preview_gstr2b_df = standardize_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
+        preview_purchase_df = _process_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
+        preview_gstr2b_df = _process_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
     except InputMappingError as exc:
         preview_error = str(exc)
     except Exception:
         preview_error = "Error processing file. Please check format."
 
     if preview_error:
-        st.error("Please complete column mapping before proceeding.")
+        _show_processing_message(preview_error)
     else:
         preview_left, preview_right = st.columns(2)
         with preview_left:
@@ -305,13 +332,13 @@ if not run_reconciliation:
     st.stop()
 
 try:
-    purchase_df = standardize_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
-    gstr2b_df = standardize_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
-except InputMappingError:
-    st.error("Please complete column mapping before proceeding.")
+    purchase_df = _process_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
+    gstr2b_df = _process_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
+except InputMappingError as exc:
+    _show_processing_message(str(exc))
     st.stop()
-except Exception:
-    st.error("Error processing file. Please check format.")
+except Exception as exc:
+    st.error(f"Error: {str(exc)}")
     st.stop()
 
 if len(purchase_df) < 5 or len(gstr2b_df) < 5:
@@ -319,20 +346,20 @@ if len(purchase_df) < 5 or len(gstr2b_df) < 5:
 
 try:
     with st.spinner("Running reconciliation..."):
-        reconciliation_df = reconcile_invoices(
+        reconciliation_df = _run_reconciliation(
             purchase_df,
             gstr2b_df,
-            value_tolerance=value_tolerance,
-            date_tolerance_days=date_tolerance,
-            fuzzy_threshold=fuzzy_threshold,
+            value_tolerance,
+            date_tolerance,
+            fuzzy_threshold,
         )
 except MissingRequiredColumnsError as exc:
     st.error("Uploaded file is missing required columns.")
     with st.expander("Column details"):
         st.write({"missing_columns": exc.missing_columns, "uploaded_columns": exc.available_columns})
     st.stop()
-except Exception:
-    st.error("Error processing file. Please check format.")
+except Exception as exc:
+    st.error(f"Error: {str(exc)}")
     st.stop()
 
 if reconciliation_df.empty:

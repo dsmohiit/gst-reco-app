@@ -43,12 +43,17 @@ def load_input_file(uploaded_file, skiprows: int = 0) -> pd.DataFrame:
     effective_skiprows = int(skiprows) if skiprows else None
 
     if name.endswith(".csv"):
-        return pd.read_csv(BytesIO(file_bytes), skiprows=effective_skiprows)
+        df = pd.read_csv(BytesIO(file_bytes), skiprows=effective_skiprows)
+    elif name.endswith(".xlsx") or name.endswith(".xls"):
+        df = pd.read_excel(BytesIO(file_bytes), skiprows=effective_skiprows)
+    else:
+        raise InputMappingError("Unsupported file format.")
 
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(BytesIO(file_bytes), skiprows=effective_skiprows)
+    if df.empty:
+        raise InputMappingError("Uploaded file is empty or corrupted.")
 
-    raise InputMappingError("Unsupported file format.")
+    df.columns = df.columns.astype(str).str.strip().str.lower()
+    return df
 
 
 def _make_unique(columns: Sequence[str]) -> List[str]:
@@ -195,8 +200,10 @@ def standardize_mapped_dataframe(df: pd.DataFrame, column_mapping: Dict[str, str
     if "Invoice Date" not in standardized.columns:
         standardized["Invoice Date"] = pd.NaT
 
-    standardized["Purchase Value"] = pd.to_numeric(standardized["Purchase Value"], errors="coerce")
+    standardized["Purchase Value"] = pd.to_numeric(standardized["Purchase Value"], errors="coerce").fillna(0)
     standardized["Invoice Date"] = pd.to_datetime(standardized["Invoice Date"], errors="coerce")
+    if standardized.empty:
+        return standardized
     if standardized["Purchase Value"].notna().sum() == 0:
         raise InputMappingError("Purchase Value column could not be parsed. Please check mapping and data format.")
     return standardized

@@ -151,6 +151,7 @@ def _normalize_invoice_number(series: pd.Series) -> pd.Series:
         .str.lower()
         .str.replace(r"[/\-\s]+", "", regex=True)
         .str.replace(r"[^a-z0-9]", "", regex=True)
+        .str.lstrip("0")
     )
 
 
