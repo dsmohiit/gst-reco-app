@@ -13,6 +13,15 @@ from .engine import (
     MissingRequiredColumnsError,
     reconcile_invoices,
 )
+from .input_mapping import (
+    COLUMN_SYNONYMS,
+    FIELD_LABELS,
+    InputMappingError,
+    inspect_input_dataframe,
+    load_input_file,
+    standardize_mapped_dataframe,
+    validate_column_mapping,
+)
 
 __all__ = [
     "build_client_report",
@@ -23,9 +32,16 @@ __all__ = [
     "build_summary_metrics",
     "build_vendor_summary",
     "clean_invoice_data",
+    "COLUMN_SYNONYMS",
+    "FIELD_LABELS",
     "generate_action",
     "generate_explanation",
+    "inspect_input_dataframe",
+    "InputMappingError",
+    "load_input_file",
     "load_invoice_file",
     "MissingRequiredColumnsError",
     "reconcile_invoices",
+    "standardize_mapped_dataframe",
+    "validate_column_mapping",
 ]

@@ -6,6 +6,8 @@ import pandas as pd
 import streamlit as st
 
 from gst_recon import (
+    FIELD_LABELS,
+    InputMappingError,
     MissingRequiredColumnsError,
     build_client_report,
     build_follow_up_sheet,
@@ -13,12 +15,15 @@ from gst_recon import (
     build_reconciliation_export,
     build_summary_metrics,
     build_vendor_summary,
-    load_invoice_file,
+    inspect_input_dataframe,
+    load_input_file,
     reconcile_invoices,
+    standardize_mapped_dataframe,
 )
 
 
 FILE_SIZE_WARNING_BYTES = 50 * 1024 * 1024
+MANUAL_SELECT_PLACEHOLDER = "-- Select column --"
 
 
 st.set_page_config(
@@ -77,6 +82,47 @@ def _warn_for_file_size(uploaded_file) -> None:
         )
 
 
+def _render_mapping_controls(title: str, inspection_result, key_prefix: str) -> dict[str, str | None]:
+    resolved_mapping: dict[str, str | None] = {}
+    available_columns = inspection_result.dataframe.columns.tolist()
+    st.markdown(f"#### {title} Column Mapping")
+
+    for field, label in FIELD_LABELS.items():
+        suggested_value = inspection_result.suggested_mapping.get(field)
+        is_ambiguous = field in inspection_result.ambiguous_columns
+        requires_manual_selection = is_ambiguous or suggested_value is None
+
+        if requires_manual_selection:
+            options = [MANUAL_SELECT_PLACEHOLDER] + available_columns
+            default_index = options.index(suggested_value) if suggested_value in available_columns else 0
+            help_text = (
+                f"Multiple possible columns found: {inspection_result.ambiguous_columns[field]}"
+                if is_ambiguous
+                else f"No confident match found for {label}. Please select it manually."
+            )
+            selected_value = st.selectbox(
+                f"{title}: {label}",
+                options,
+                index=default_index,
+                key=f"{key_prefix}_{field}",
+                help=help_text,
+            )
+            resolved_mapping[field] = None if selected_value == MANUAL_SELECT_PLACEHOLDER else selected_value
+        else:
+            resolved_mapping[field] = suggested_value
+            st.caption(f"{label}: {suggested_value}")
+
+    with st.expander(f"{title} Mapping Debug", expanded=False):
+        st.write("Available columns:", available_columns)
+        st.write("Suggested mapping:", inspection_result.suggested_mapping)
+        st.write("Resolved mapping:", resolved_mapping)
+
+    if resolved_mapping.get("invoice_date") is None:
+        st.warning(f"{title}: Invoice Date was not mapped. Downstream checks may mark records as DATE ERROR.")
+
+    return resolved_mapping
+
+
 st.title("GST Reconciliation Assistant")
 st.warning(
     "This tool provides automated insights. Please review results before making financial or compliance decisions."
@@ -104,6 +150,23 @@ with st.sidebar:
     _warn_for_file_size(purchase_file)
     _warn_for_file_size(gstr2b_file)
 
+    purchase_skip_rows = st.number_input(
+        "Skip top rows (Purchase Register)",
+        min_value=0,
+        max_value=10,
+        value=0,
+        step=1,
+        help="Use this if the file has extra title rows or merged header rows.",
+    )
+    gstr2b_skip_rows = st.number_input(
+        "Skip top rows (GSTR-2B)",
+        min_value=0,
+        max_value=10,
+        value=0,
+        step=1,
+        help="Use this if the file has extra title rows or merged header rows.",
+    )
+
     st.header("Tolerance Controls")
     value_tolerance = st.slider("Value tolerance (Rs.)", min_value=1, max_value=20, value=2, step=1)
     date_tolerance = st.slider("Date tolerance (days)", min_value=0, max_value=30, value=5, step=1)
@@ -125,14 +188,35 @@ if purchase_file is None or gstr2b_file is None:
     st.info("Upload both files to enable reconciliation.")
     st.stop()
 
+try:
+    with st.spinner("Reading uploaded files..."):
+        purchase_raw_df = load_input_file(purchase_file, skiprows=int(purchase_skip_rows))
+        gstr2b_raw_df = load_input_file(gstr2b_file, skiprows=int(gstr2b_skip_rows))
+        purchase_inspection = inspect_input_dataframe(purchase_raw_df)
+        gstr2b_inspection = inspect_input_dataframe(gstr2b_raw_df)
+except InputMappingError as exc:
+    st.error(str(exc))
+    st.stop()
+except Exception:
+    st.error("Error processing file. Please check format.")
+    st.stop()
+
+mapping_left, mapping_right = st.columns(2)
+with mapping_left:
+    purchase_mapping = _render_mapping_controls("Purchase Register", purchase_inspection, "purchase_mapping")
+with mapping_right:
+    gstr2b_mapping = _render_mapping_controls("GSTR-2B", gstr2b_inspection, "gstr2b_mapping")
+
 if not run_reconciliation:
-    st.info("Adjust tolerances if needed, then click Run Reconciliation.")
+    st.info("Review the detected mappings, adjust if needed, then click Run Reconciliation.")
     st.stop()
 
 try:
-    with st.spinner("Reading uploaded files..."):
-        purchase_df = load_invoice_file(purchase_file)
-        gstr2b_df = load_invoice_file(gstr2b_file)
+    purchase_df = standardize_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
+    gstr2b_df = standardize_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
+except InputMappingError as exc:
+    st.error(str(exc))
+    st.stop()
 except Exception:
     st.error("Error processing file. Please check format.")
     st.stop()
