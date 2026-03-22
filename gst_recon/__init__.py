@@ -19,6 +19,7 @@ from .input_mapping import (
     InputMappingError,
     inspect_input_dataframe,
     load_input_file,
+    prepare_data,
     standardize_mapped_dataframe,
     validate_column_mapping,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "load_input_file",
     "load_invoice_file",
     "MissingRequiredColumnsError",
+    "prepare_data",
     "reconcile_invoices",
     "standardize_mapped_dataframe",
     "validate_column_mapping",

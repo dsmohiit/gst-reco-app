@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from io import StringIO
 
 import pandas as pd
@@ -16,6 +17,7 @@ from gst_recon import (
     build_vendor_summary,
     inspect_input_dataframe,
     load_input_file,
+    prepare_data,
     reconcile_invoices,
     standardize_mapped_dataframe,
 )
@@ -179,7 +181,7 @@ def _render_preview(title: str, standardized_df: pd.DataFrame) -> None:
 
 
 def _process_mapped_dataframe(df, mapping):
-    standardized_df = standardize_mapped_dataframe(df, mapping)
+    standardized_df = prepare_data(df, mapping)
     if standardized_df.empty:
         raise InputMappingError("The mapped columns resulted in an empty dataset. Please check your mapping.")
     standardized_df["Purchase Value"] = pd.to_numeric(standardized_df["Purchase Value"], errors="coerce").fillna(0)
@@ -341,6 +343,11 @@ except Exception as exc:
     st.error(f"Error: {str(exc)}")
     st.stop()
 
+st.write(f"Rows in Purchase: {len(purchase_df)}, Rows in 2B: {len(gstr2b_df)}")
+if len(purchase_df) == 0 or len(gstr2b_df) == 0:
+    st.warning("The mapped columns resulted in an empty dataset. Please check your Skip Rows setting or Sheet Selection.")
+    st.stop()
+
 if len(purchase_df) < 5 or len(gstr2b_df) < 5:
     st.warning("Sample size too small for meaningful analysis.")
 
@@ -359,7 +366,7 @@ except MissingRequiredColumnsError as exc:
         st.write({"missing_columns": exc.missing_columns, "uploaded_columns": exc.available_columns})
     st.stop()
 except Exception as exc:
-    st.error(f"Error: {str(exc)}")
+    st.error(traceback.format_exc())
     st.stop()
 
 if reconciliation_df.empty:

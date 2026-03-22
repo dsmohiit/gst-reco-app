@@ -52,7 +52,7 @@ def load_input_file(uploaded_file, skiprows: int = 0) -> pd.DataFrame:
     if df.empty:
         raise InputMappingError("Uploaded file is empty or corrupted.")
 
-    df.columns = df.columns.astype(str).str.strip().str.lower()
+    df.columns = [str(col).strip().lower() for col in df.columns]
     return df
 
 
@@ -186,24 +186,80 @@ def validate_column_mapping(column_mapping: Dict[str, str | None], df_columns: S
 
 
 def standardize_mapped_dataframe(df: pd.DataFrame, column_mapping: Dict[str, str | None]) -> pd.DataFrame:
-    validate_column_mapping(column_mapping, df.columns.tolist())
+    return prepare_data(df, column_mapping)
 
-    rename_map = {
-        column_mapping["gstin"]: "GSTIN",
-        column_mapping["invoice_number"]: "Invoice Number",
-        column_mapping["taxable_value"]: "Purchase Value",
-    }
-    if column_mapping.get("invoice_date"):
-        rename_map[column_mapping["invoice_date"]] = "Invoice Date"
 
-    standardized = df.rename(columns=rename_map).copy()
-    if "Invoice Date" not in standardized.columns:
-        standardized["Invoice Date"] = pd.NaT
+def prepare_data(df: pd.DataFrame, mapping: Dict[str, str | None]) -> pd.DataFrame:
+    working_df = df.copy()
+    working_df.columns = [str(col).strip().lower() for col in working_df.columns]
 
-    standardized["Purchase Value"] = pd.to_numeric(standardized["Purchase Value"], errors="coerce").fillna(0)
-    standardized["Invoice Date"] = pd.to_datetime(standardized["Invoice Date"], errors="coerce")
+    validate_column_mapping(mapping, working_df.columns.tolist())
+
+    rename_map: Dict[str, str] = {}
+
+    gstin_col = mapping.get("gstin")
+    invoice_col = mapping.get("invoice_number")
+    date_col = mapping.get("invoice_date")
+    amount_col = mapping.get("taxable_value")
+
+    if gstin_col in working_df.columns:
+        rename_map[gstin_col] = "gstin_internal"
+    if invoice_col in working_df.columns:
+        rename_map[invoice_col] = "inv_no_internal"
+    if date_col and date_col in working_df.columns:
+        rename_map[date_col] = "date_internal"
+    if amount_col in working_df.columns:
+        rename_map[amount_col] = "amount_internal"
+
+    working_df = working_df.rename(columns=rename_map).copy()
+
+    required_internal_columns = ["gstin_internal", "inv_no_internal", "amount_internal"]
+    missing_internal = [column for column in required_internal_columns if column not in working_df.columns]
+    if missing_internal:
+        raise InputMappingError("Uploaded file is missing required columns.")
+
+    working_df["amount_internal"] = pd.to_numeric(working_df["amount_internal"], errors="coerce").fillna(0)
+    working_df["gstin_internal"] = (
+        working_df["gstin_internal"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    working_df["inv_no_internal"] = (
+        working_df["inv_no_internal"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+    working_df["norm_inv_no"] = (
+        working_df["inv_no_internal"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r"[^a-z0-9]", "", regex=True)
+        .str.lstrip("0")
+    )
+
+    if "date_internal" in working_df.columns:
+        working_df["date_internal"] = pd.to_datetime(working_df["date_internal"], errors="coerce")
+    else:
+        working_df["date_internal"] = pd.NaT
+
+    standardized = pd.DataFrame(
+        {
+            "GSTIN": working_df["gstin_internal"],
+            "Invoice Number": working_df["inv_no_internal"],
+            "Invoice Date": working_df["date_internal"],
+            "Purchase Value": working_df["amount_internal"],
+            "Normalized Invoice Number": working_df["norm_inv_no"],
+        }
+    )
+
     if standardized.empty:
-        return standardized
+        return standardized.copy()
     if standardized["Purchase Value"].notna().sum() == 0:
         raise InputMappingError("Purchase Value column could not be parsed. Please check mapping and data format.")
-    return standardized
+    return standardized.copy()
