@@ -15,6 +15,8 @@ from .engine import (
 )
 from .input_mapping import (
     COLUMN_SYNONYMS,
+    detect_file_header,
+    detect_header_row,
     FIELD_LABELS,
     InputMappingError,
     inspect_input_dataframe,
@@ -34,6 +36,8 @@ __all__ = [
     "build_vendor_summary",
     "clean_invoice_data",
     "COLUMN_SYNONYMS",
+    "detect_file_header",
+    "detect_header_row",
     "FIELD_LABELS",
     "generate_action",
     "generate_explanation",

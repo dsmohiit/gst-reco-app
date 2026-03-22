@@ -22,6 +22,18 @@ FIELD_LABELS = {
 }
 
 REQUIRED_MAPPING_FIELDS = ["gstin", "invoice_number", "taxable_value"]
+HEADER_SIGNPOST_KEYWORDS = [
+    "gstin",
+    "invoice",
+    "inv no",
+    "inv date",
+    "date",
+    "taxable",
+    "taxable value",
+    "total",
+    "amount",
+    "supplier",
+]
 
 
 class InputMappingError(ValueError):
@@ -37,22 +49,74 @@ class InputMappingResult:
     review_required: Dict[str, bool]
 
 
-def load_input_file(uploaded_file, skiprows: int = 0) -> pd.DataFrame:
+def _read_uploaded_file(uploaded_file, header=0, skiprows=None) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     file_bytes = uploaded_file.getvalue()
-    effective_skiprows = int(skiprows) if skiprows else None
 
     if name.endswith(".csv"):
-        df = pd.read_csv(BytesIO(file_bytes), skiprows=effective_skiprows)
-    elif name.endswith(".xlsx") or name.endswith(".xls"):
-        df = pd.read_excel(BytesIO(file_bytes), skiprows=effective_skiprows)
+        return pd.read_csv(BytesIO(file_bytes), header=header, skiprows=skiprows)
+
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        return pd.read_excel(BytesIO(file_bytes), header=header, skiprows=skiprows)
+
+    raise InputMappingError("Unsupported file format.")
+
+
+def detect_header_row(df_raw: pd.DataFrame, max_rows: int = 15) -> Tuple[int, int]:
+    if df_raw.empty:
+        return 0, 0
+
+    best_row_index = 0
+    best_score = 0
+
+    rows_to_scan = min(max_rows, len(df_raw))
+    for row_index in range(rows_to_scan):
+        row_series = pd.Series(df_raw.iloc[row_index], dtype="object").fillna("").astype(str).str.strip().str.lower()
+        row_score = 0
+        for keyword in HEADER_SIGNPOST_KEYWORDS:
+            if row_series.str.contains(keyword, case=False, regex=False, na=False).any():
+                row_score += 1
+
+        if row_score > best_score:
+            best_score = row_score
+            best_row_index = row_index
+
+    return best_row_index, best_score
+
+
+def detect_file_header(uploaded_file, max_rows: int = 15) -> Tuple[int, int]:
+    raw_df = _read_uploaded_file(uploaded_file, header=None)
+    if raw_df.empty:
+        raise InputMappingError("Uploaded file is empty or corrupted.")
+    return detect_header_row(raw_df, max_rows=max_rows)
+
+
+def load_input_file(uploaded_file, skiprows: int | None = None) -> pd.DataFrame:
+    detected_header_row = 0
+    detected_score = 0
+    auto_detected = False
+
+    if skiprows is None:
+        raw_df = _read_uploaded_file(uploaded_file, header=None)
+        if raw_df.empty:
+            raise InputMappingError("Uploaded file is empty or corrupted.")
+        detected_header_row, detected_score = detect_header_row(raw_df)
+        uploaded_file.seek(0)
+        effective_skiprows = int(detected_header_row) if detected_score > 0 else 0
+        auto_detected = detected_score > 0
     else:
-        raise InputMappingError("Unsupported file format.")
+        effective_skiprows = int(skiprows) if skiprows else 0
+
+    df = _read_uploaded_file(uploaded_file, header=0, skiprows=effective_skiprows)
 
     if df.empty:
         raise InputMappingError("Uploaded file is empty or corrupted.")
 
     df.columns = [str(col).strip().lower() for col in df.columns]
+    df.attrs["detected_header_row"] = int(detected_header_row)
+    df.attrs["header_detection_score"] = int(detected_score)
+    df.attrs["header_auto_detected"] = auto_detected
+    df.attrs["header_detection_warning"] = bool(auto_detected and detected_score == 0)
     return df
 
 

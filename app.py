@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from gst_recon import (
+    detect_file_header,
     InputMappingError,
     MissingRequiredColumnsError,
     build_client_report,
@@ -92,6 +93,27 @@ def _warn_for_file_size(uploaded_file) -> None:
 
 def _build_file_token(uploaded_file, skip_rows: int) -> str:
     return f"{uploaded_file.name}:{getattr(uploaded_file, 'size', 0)}:{skip_rows}"
+
+
+def _initialize_header_detection_state(dataset_key: str, uploaded_file) -> None:
+    st.session_state.setdefault("header_detection_tokens", {})
+    st.session_state.setdefault("header_detection_results", {})
+
+    if uploaded_file is None:
+        return
+
+    file_token = f"{uploaded_file.name}:{getattr(uploaded_file, 'size', 0)}"
+    existing_token = st.session_state["header_detection_tokens"].get(dataset_key)
+    if existing_token == file_token:
+        return
+
+    detected_row, detected_score = detect_file_header(uploaded_file)
+    st.session_state["header_detection_tokens"][dataset_key] = file_token
+    st.session_state["header_detection_results"][dataset_key] = {
+        "row": int(detected_row),
+        "score": int(detected_score),
+    }
+    st.session_state[f"{dataset_key}_skip_rows"] = int(detected_row if detected_score > 0 else 0)
 
 
 def _initialize_mapping_state(dataset_key: str, inspection_result, file_token: str) -> None:
@@ -234,20 +256,30 @@ with st.sidebar:
     _warn_for_file_size(purchase_file)
     _warn_for_file_size(gstr2b_file)
 
+    try:
+        _initialize_header_detection_state("purchase", purchase_file)
+        _initialize_header_detection_state("gstr2b", gstr2b_file)
+    except InputMappingError as exc:
+        st.error(str(exc))
+        st.stop()
+    except Exception as exc:
+        st.error(f"Error: {str(exc)}")
+        st.stop()
+
     purchase_skip_rows = st.number_input(
         "Skip top rows (Purchase Register)",
         min_value=0,
-        max_value=10,
-        value=0,
+        max_value=25,
         step=1,
+        key="purchase_skip_rows",
         help="Use this if the file has extra title rows or merged header rows.",
     )
     gstr2b_skip_rows = st.number_input(
         "Skip top rows (GSTR-2B)",
         min_value=0,
-        max_value=10,
-        value=0,
+        max_value=25,
         step=1,
+        key="gstr2b_skip_rows",
         help="Use this if the file has extra title rows or merged header rows.",
     )
 
@@ -272,10 +304,34 @@ if purchase_file is None or gstr2b_file is None:
     st.info("Upload both files to enable reconciliation.")
     st.stop()
 
+purchase_header_info = st.session_state.get("header_detection_results", {}).get("purchase", {"row": 0, "score": 0})
+gstr2b_header_info = st.session_state.get("header_detection_results", {}).get("gstr2b", {"row": 0, "score": 0})
+
+if purchase_header_info.get("score", 0) == 0:
+    st.warning("Could not auto-detect header for Purchase Register. Please select manually.")
+
+if gstr2b_header_info.get("score", 0) == 0:
+    st.warning("Could not auto-detect header for GSTR-2B. Please select manually.")
+
 try:
     with st.spinner("Reading uploaded files..."):
-        purchase_raw_df = load_input_file(purchase_file, skiprows=int(purchase_skip_rows))
-        gstr2b_raw_df = load_input_file(gstr2b_file, skiprows=int(gstr2b_skip_rows))
+        purchase_skip_param = (
+            None
+            if purchase_header_info.get("score", 0) > 0 and int(purchase_skip_rows) == int(purchase_header_info["row"])
+            else int(purchase_skip_rows)
+        )
+        gstr2b_skip_param = (
+            None
+            if gstr2b_header_info.get("score", 0) > 0 and int(gstr2b_skip_rows) == int(gstr2b_header_info["row"])
+            else int(gstr2b_skip_rows)
+        )
+
+        purchase_raw_df = load_input_file(purchase_file, skiprows=purchase_skip_param)
+        gstr2b_raw_df = load_input_file(gstr2b_file, skiprows=gstr2b_skip_param)
+        if purchase_raw_df.attrs.get("header_auto_detected"):
+            st.toast(f"🎯 Auto-detected header at row {purchase_raw_df.attrs.get('detected_header_row', 0)}", icon="✅")
+        if gstr2b_raw_df.attrs.get("header_auto_detected"):
+            st.toast(f"🎯 Auto-detected header at row {gstr2b_raw_df.attrs.get('detected_header_row', 0)}", icon="✅")
         purchase_inspection = inspect_input_dataframe(purchase_raw_df)
         gstr2b_inspection = inspect_input_dataframe(gstr2b_raw_df)
 except InputMappingError as exc:
