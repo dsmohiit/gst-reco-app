@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import re
 from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
@@ -11,7 +12,7 @@ COLUMN_SYNONYMS = {
     "gstin": ["gstin", "gst number", "gst no", "supplier gstin"],
     "invoice_number": ["invoice number", "invoice no", "inv no", "bill no", "document number"],
     "invoice_date": ["invoice date", "inv date", "bill date", "date"],
-    "taxable_value": ["taxable value", "purchase value", "invoice value", "taxable amount"],
+    "taxable_value": ["taxable value", "taxable amount", "assessable value", "value"],
 }
 
 FIELD_LABELS = {
@@ -47,6 +48,15 @@ class InputMappingResult:
     ambiguous_columns: Dict[str, List[str]]
     confidence: Dict[str, str]
     review_required: Dict[str, bool]
+
+
+def _sanitize_column_names(columns: Sequence[object]) -> List[str]:
+    sanitized = [
+        re.sub(r"[^a-z0-9\s]", "", str(col).lower().strip())
+        for col in columns
+    ]
+    sanitized = [re.sub(r"\s+", " ", col).strip() for col in sanitized]
+    return sanitized
 
 
 def _read_uploaded_file(uploaded_file, header=0, skiprows=None) -> pd.DataFrame:
@@ -112,7 +122,7 @@ def load_input_file(uploaded_file, skiprows: int | None = None) -> pd.DataFrame:
     if df.empty:
         raise InputMappingError("Uploaded file is empty or corrupted.")
 
-    df.columns = [str(col).strip().lower() for col in df.columns]
+    df.columns = _sanitize_column_names(df.columns)
     df.attrs["detected_header_row"] = int(detected_header_row)
     df.attrs["header_detection_score"] = int(detected_score)
     df.attrs["header_auto_detected"] = auto_detected
@@ -145,12 +155,7 @@ def preprocess_input_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if cleaned.empty or cleaned.shape[1] == 0:
         raise InputMappingError("Uploaded file is empty or corrupted.")
 
-    cleaned.columns = (
-        cleaned.columns.astype(str)
-        .str.lower()
-        .str.strip()
-        .str.replace(r"[^a-z0-9 ]", "", regex=True)
-    )
+    cleaned.columns = _sanitize_column_names(cleaned.columns)
     cleaned.columns = _make_unique(cleaned.columns.tolist())
 
     for column in cleaned.columns:
@@ -255,7 +260,7 @@ def standardize_mapped_dataframe(df: pd.DataFrame, column_mapping: Dict[str, str
 
 def prepare_data(df: pd.DataFrame, mapping: Dict[str, str | None]) -> pd.DataFrame:
     working_df = df.copy()
-    working_df.columns = [str(col).strip().lower() for col in working_df.columns]
+    working_df.columns = _sanitize_column_names(working_df.columns)
 
     validate_column_mapping(mapping, working_df.columns.tolist())
 

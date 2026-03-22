@@ -844,6 +844,58 @@ def build_vendor_summary(reconciliation_df: pd.DataFrame) -> pd.DataFrame:
     return vendor_summary.reset_index(drop=True)
 
 
+def generate_vendor_summary(reconciliation_df: pd.DataFrame) -> pd.DataFrame:
+    if reconciliation_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "GSTIN",
+                "Vendor Name",
+                "Total Invoices",
+                "Matched Invoices",
+                "ITC At Risk",
+                "Compliance Score",
+                "Risk Level",
+            ]
+        )
+
+    working_df = reconciliation_df.copy()
+    working_df["GSTIN"] = working_df["GSTIN"].fillna("").astype(str)
+    working_df["Supplier Name"] = working_df["Supplier Name"].fillna("").astype(str).str.strip()
+    risk_view = build_itc_risk_view(working_df)
+    vendor_risk = (
+        risk_view.groupby(["GSTIN", "Supplier Name"], dropna=False)["Risk Amount"]
+        .sum()
+        .reset_index(name="ITC At Risk")
+        if not risk_view.empty
+        else pd.DataFrame(columns=["GSTIN", "Supplier Name", "ITC At Risk"])
+    )
+
+    summary = (
+        working_df.groupby(["GSTIN", "Supplier Name"], dropna=False)
+        .agg(
+            total_invoices=("Invoice Number", "count"),
+            matched_invoices=("Status", lambda x: (x == "MATCHED").sum()),
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Supplier Name": "Vendor Name",
+                "total_invoices": "Total Invoices",
+                "matched_invoices": "Matched Invoices",
+            }
+        )
+    )
+
+    vendor_risk = vendor_risk.rename(columns={"Supplier Name": "Vendor Name"})
+    summary = summary.merge(vendor_risk, on=["GSTIN", "Vendor Name"], how="left")
+    summary["ITC At Risk"] = summary["ITC At Risk"].fillna(0.0).round(2)
+    summary["Compliance Score"] = (
+        (summary["Matched Invoices"] / summary["Total Invoices"].replace(0, np.nan)) * 100
+    ).fillna(0.0).round(1)
+    summary["Risk Level"] = np.where(summary["Compliance Score"] < 80, "High Risk", "Normal")
+    return summary.sort_values(by="ITC At Risk", ascending=False).reset_index(drop=True)
+
+
 def build_follow_up_sheet(reconciliation_df: pd.DataFrame) -> pd.DataFrame:
     if reconciliation_df.empty:
         return pd.DataFrame(columns=["GSTIN", "Issue Type", "Invoice Count", "Suggested Action"])

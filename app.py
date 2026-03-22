@@ -16,6 +16,7 @@ from gst_recon import (
     build_reconciliation_export,
     build_summary_metrics,
     build_vendor_summary,
+    generate_vendor_summary,
     inspect_input_dataframe,
     load_input_file,
     prepare_data,
@@ -81,6 +82,14 @@ def _row_highlight(row: pd.Series) -> list[str]:
 def _render_data_table(df: pd.DataFrame, height: int = 460) -> None:
     styled = df.style.apply(_row_highlight, axis=1)
     st.dataframe(styled, use_container_width=True, height=height)
+
+
+def _vendor_scorecard_highlight(row: pd.Series) -> list[str]:
+    if float(row.get("Compliance Score", 0) or 0) < 80:
+        style = "background-color: #fef3c7; color: #92400e;"
+    else:
+        style = ""
+    return [style] * len(row)
 
 
 def _warn_for_file_size(uploaded_file) -> None:
@@ -437,6 +446,7 @@ client_report_df = build_client_report(reconciliation_df)
 summary_metrics = build_summary_metrics(reconciliation_df)
 risk_summary = build_itc_risk_summary(reconciliation_df)
 vendor_summary_df = build_vendor_summary(reconciliation_df)
+vendor_scorecard_df = generate_vendor_summary(reconciliation_df)
 follow_up_df = build_follow_up_sheet(reconciliation_df)
 processing_log = reconciliation_df.attrs.get("processing_log", {})
 
@@ -454,6 +464,16 @@ st.markdown(
     f"{risk_summary['num_risky_invoices']:,} invoices from {risk_summary['num_vendors']:,} vendors."
 )
 st.caption("⚠️ This is an automated estimate. Please review before making compliance decisions.")
+
+st.subheader("📊 Vendor Risk Scorecard")
+high_risk_vendors = vendor_scorecard_df[vendor_scorecard_df["Compliance Score"] < 80].copy()
+if not high_risk_vendors.empty:
+    st.warning("Vendors with compliance below 80% are marked as High Risk and should be reviewed first.")
+st.dataframe(
+    vendor_scorecard_df.style.apply(_vendor_scorecard_highlight, axis=1),
+    use_container_width=True,
+    height=320,
+)
 
 metric_columns = st.columns(4)
 metric_columns[0].metric("Total Invoices", f"{summary_metrics['total_invoices']:,}")
