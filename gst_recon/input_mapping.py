@@ -33,6 +33,8 @@ class InputMappingResult:
     dataframe: pd.DataFrame
     suggested_mapping: Dict[str, str | None]
     ambiguous_columns: Dict[str, List[str]]
+    confidence: Dict[str, str]
+    review_required: Dict[str, bool]
 
 
 def load_input_file(uploaded_file, skiprows: int = 0) -> pd.DataFrame:
@@ -99,30 +101,69 @@ def detect_columns(df_columns: Sequence[str], synonyms: Sequence[str]) -> List[s
     return list(dict.fromkeys(matches))
 
 
-def build_column_mapping(df_columns: Sequence[str]) -> Tuple[Dict[str, str | None], Dict[str, List[str]]]:
+def _normalize_synonyms(synonyms: Sequence[str]) -> List[str]:
+    normalized = (
+        pd.Index(synonyms, dtype="string")
+        .str.lower()
+        .str.strip()
+        .str.replace(r"[^a-z0-9 ]", "", regex=True)
+        .tolist()
+    )
+    return [value for value in normalized if value]
+
+
+def build_column_mapping(
+    df_columns: Sequence[str],
+) -> Tuple[Dict[str, str | None], Dict[str, List[str]], Dict[str, str], Dict[str, bool]]:
     column_mapping: Dict[str, str | None] = {}
     ambiguous_columns: Dict[str, List[str]] = {}
+    confidence: Dict[str, str] = {}
+    review_required: Dict[str, bool] = {}
 
     for key, synonyms in COLUMN_SYNONYMS.items():
-        matches = detect_columns(df_columns, synonyms)
-        if len(matches) == 1:
-            column_mapping[key] = matches[0]
-        elif len(matches) > 1:
-            ambiguous_columns[key] = matches
+        normalized_synonyms = _normalize_synonyms(synonyms)
+        exact_matches = [column for column in df_columns if column in normalized_synonyms]
+        partial_matches = [
+            column
+            for column in detect_columns(df_columns, normalized_synonyms)
+            if column not in exact_matches
+        ]
+
+        if len(exact_matches) == 1:
+            column_mapping[key] = exact_matches[0]
+            confidence[key] = "HIGH"
+            review_required[key] = False
+        elif len(exact_matches) > 1:
+            ambiguous_columns[key] = exact_matches
             column_mapping[key] = None
+            confidence[key] = "LOW"
+            review_required[key] = True
+        elif len(partial_matches) == 1:
+            column_mapping[key] = partial_matches[0]
+            confidence[key] = "MEDIUM"
+            review_required[key] = False
+        elif len(partial_matches) > 1:
+            ambiguous_columns[key] = partial_matches
+            column_mapping[key] = None
+            confidence[key] = "LOW"
+            review_required[key] = True
         else:
             column_mapping[key] = None
+            confidence[key] = "MISSING"
+            review_required[key] = True
 
-    return column_mapping, ambiguous_columns
+    return column_mapping, ambiguous_columns, confidence, review_required
 
 
 def inspect_input_dataframe(df: pd.DataFrame) -> InputMappingResult:
     cleaned = preprocess_input_dataframe(df)
-    mapping, ambiguous = build_column_mapping(cleaned.columns.tolist())
+    mapping, ambiguous, confidence, review_required = build_column_mapping(cleaned.columns.tolist())
     return InputMappingResult(
         dataframe=cleaned,
         suggested_mapping=mapping,
         ambiguous_columns=ambiguous,
+        confidence=confidence,
+        review_required=review_required,
     )
 
 

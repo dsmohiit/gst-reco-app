@@ -6,7 +6,6 @@ import pandas as pd
 import streamlit as st
 
 from gst_recon import (
-    FIELD_LABELS,
     InputMappingError,
     MissingRequiredColumnsError,
     build_client_report,
@@ -24,6 +23,13 @@ from gst_recon import (
 
 FILE_SIZE_WARNING_BYTES = 50 * 1024 * 1024
 MANUAL_SELECT_PLACEHOLDER = "-- Select column --"
+DISPLAY_FIELD_LABELS = {
+    "gstin": "GST Number",
+    "invoice_number": "Invoice Number",
+    "invoice_date": "Invoice Date",
+    "taxable_value": "Amount",
+}
+REQUIRED_MAPPING_FIELDS = {"gstin", "invoice_number", "taxable_value"}
 
 
 st.set_page_config(
@@ -82,45 +88,94 @@ def _warn_for_file_size(uploaded_file) -> None:
         )
 
 
-def _render_mapping_controls(title: str, inspection_result, key_prefix: str) -> dict[str, str | None]:
-    resolved_mapping: dict[str, str | None] = {}
+def _build_file_token(uploaded_file, skip_rows: int) -> str:
+    return f"{uploaded_file.name}:{getattr(uploaded_file, 'size', 0)}:{skip_rows}"
+
+
+def _initialize_mapping_state(dataset_key: str, inspection_result, file_token: str) -> None:
+    st.session_state.setdefault("column_mapping", {})
+    st.session_state.setdefault("mapping_tokens", {})
+    st.session_state.setdefault("show_mapping_ui", False)
+
+    existing_token = st.session_state["mapping_tokens"].get(dataset_key)
+    if existing_token != file_token:
+        st.session_state["column_mapping"][dataset_key] = inspection_result.suggested_mapping.copy()
+        st.session_state["mapping_tokens"][dataset_key] = file_token
+        st.session_state["show_mapping_ui"] = False
+
+
+def _get_mapping_state(dataset_key: str) -> dict[str, str | None]:
+    return st.session_state["column_mapping"].get(dataset_key, {}).copy()
+
+
+def _mapping_requires_attention(inspection_result, mapping: dict[str, str | None]) -> bool:
+    for field in DISPLAY_FIELD_LABELS:
+        if inspection_result.confidence.get(field) == "LOW":
+            return True
+        if mapping.get(field) is None:
+            return True
+    return False
+
+
+def _render_mapping_status(purchase_inspection, purchase_mapping, gstr2b_inspection, gstr2b_mapping) -> None:
+    purchase_needs_review = _mapping_requires_attention(purchase_inspection, purchase_mapping)
+    gstr2b_needs_review = _mapping_requires_attention(gstr2b_inspection, gstr2b_mapping)
+    any_medium = any(
+        confidence == "MEDIUM"
+        for confidence in list(purchase_inspection.confidence.values()) + list(gstr2b_inspection.confidence.values())
+    )
+
+    if purchase_needs_review or gstr2b_needs_review:
+        st.warning("Some columns could not be detected. Please review mapping.")
+        st.session_state["show_mapping_ui"] = True
+    elif any_medium:
+        st.info("Columns detected. Please review if needed.")
+    else:
+        st.success("Columns detected successfully")
+
+
+def _render_mapping_editor(title: str, dataset_key: str, inspection_result) -> dict[str, str | None]:
+    mapping = _get_mapping_state(dataset_key)
     available_columns = inspection_result.dataframe.columns.tolist()
-    st.markdown(f"#### {title} Column Mapping")
+    st.markdown(f"#### {title}")
 
-    for field, label in FIELD_LABELS.items():
-        suggested_value = inspection_result.suggested_mapping.get(field)
-        is_ambiguous = field in inspection_result.ambiguous_columns
-        requires_manual_selection = is_ambiguous or suggested_value is None
+    for field, label in DISPLAY_FIELD_LABELS.items():
+        options = [MANUAL_SELECT_PLACEHOLDER] + available_columns
+        current_value = mapping.get(field)
+        default_index = options.index(current_value) if current_value in options else 0
 
-        if requires_manual_selection:
-            options = [MANUAL_SELECT_PLACEHOLDER] + available_columns
-            default_index = options.index(suggested_value) if suggested_value in available_columns else 0
-            help_text = (
-                f"Multiple possible columns found: {inspection_result.ambiguous_columns[field]}"
-                if is_ambiguous
-                else f"No confident match found for {label}. Please select it manually."
-            )
-            selected_value = st.selectbox(
-                f"{title}: {label}",
-                options,
-                index=default_index,
-                key=f"{key_prefix}_{field}",
-                help=help_text,
-            )
-            resolved_mapping[field] = None if selected_value == MANUAL_SELECT_PLACEHOLDER else selected_value
-        else:
-            resolved_mapping[field] = suggested_value
-            st.caption(f"{label}: {suggested_value}")
+        help_text = None
+        if inspection_result.confidence.get(field) == "LOW":
+            help_text = "Multiple possible columns were found. Please choose the correct one."
+        elif inspection_result.confidence.get(field) == "MEDIUM":
+            help_text = "A likely match was found. Please confirm if needed."
+        elif inspection_result.confidence.get(field) == "MISSING":
+            help_text = "No column was detected for this field. Select it manually if available."
 
-    with st.expander(f"{title} Mapping Debug", expanded=False):
-        st.write("Available columns:", available_columns)
-        st.write("Suggested mapping:", inspection_result.suggested_mapping)
-        st.write("Resolved mapping:", resolved_mapping)
+        selected_value = st.selectbox(
+            f"{title}: {label}",
+            options,
+            index=default_index,
+            key=f"mapping_editor_{dataset_key}_{field}",
+            help=help_text,
+        )
+        mapping[field] = None if selected_value == MANUAL_SELECT_PLACEHOLDER else selected_value
 
-    if resolved_mapping.get("invoice_date") is None:
-        st.warning(f"{title}: Invoice Date was not mapped. Downstream checks may mark records as DATE ERROR.")
+    st.session_state["column_mapping"][dataset_key] = mapping
+    return mapping
 
-    return resolved_mapping
+
+def _render_mapping_debug(dataset_title: str, inspection_result, mapping: dict[str, str | None]) -> None:
+    with st.expander(f"Advanced Debug: {dataset_title}", expanded=False):
+        st.write("Resolved mapping:", mapping)
+        st.write("Confidence:", inspection_result.confidence)
+        st.write("Available columns:", inspection_result.dataframe.columns.tolist())
+
+
+def _render_preview(title: str, standardized_df: pd.DataFrame) -> None:
+    preview_columns = [column for column in ["GSTIN", "Invoice Number", "Invoice Date", "Purchase Value"] if column in standardized_df.columns]
+    st.markdown(f"#### {title} Preview")
+    st.dataframe(standardized_df[preview_columns].head(), use_container_width=True, height=220)
 
 
 st.title("GST Reconciliation Assistant")
@@ -202,20 +257,58 @@ except Exception:
     st.stop()
 
 mapping_left, mapping_right = st.columns(2)
-with mapping_left:
-    purchase_mapping = _render_mapping_controls("Purchase Register", purchase_inspection, "purchase_mapping")
-with mapping_right:
-    gstr2b_mapping = _render_mapping_controls("GSTR-2B", gstr2b_inspection, "gstr2b_mapping")
+purchase_token = _build_file_token(purchase_file, int(purchase_skip_rows))
+gstr2b_token = _build_file_token(gstr2b_file, int(gstr2b_skip_rows))
+_initialize_mapping_state("purchase", purchase_inspection, purchase_token)
+_initialize_mapping_state("gstr2b", gstr2b_inspection, gstr2b_token)
+purchase_mapping = _get_mapping_state("purchase")
+gstr2b_mapping = _get_mapping_state("gstr2b")
+
+_render_mapping_status(purchase_inspection, purchase_mapping, gstr2b_inspection, gstr2b_mapping)
+
+if st.button("Review / Edit Mapping"):
+    st.session_state["show_mapping_ui"] = True
+
+if st.session_state.get("show_mapping_ui", False):
+    with mapping_left:
+        purchase_mapping = _render_mapping_editor("Purchase Register Mapping", "purchase", purchase_inspection)
+    with mapping_right:
+        gstr2b_mapping = _render_mapping_editor("GSTR-2B Mapping", "gstr2b", gstr2b_inspection)
+
+_render_mapping_debug("Purchase Register", purchase_inspection, purchase_mapping)
+_render_mapping_debug("GSTR-2B", gstr2b_inspection, gstr2b_mapping)
 
 if not run_reconciliation:
-    st.info("Review the detected mappings, adjust if needed, then click Run Reconciliation.")
+    preview_error = None
+    preview_purchase_df = None
+    preview_gstr2b_df = None
+    try:
+        preview_purchase_df = standardize_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
+        preview_gstr2b_df = standardize_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
+    except InputMappingError as exc:
+        preview_error = str(exc)
+    except Exception:
+        preview_error = "Error processing file. Please check format."
+
+    if preview_error:
+        st.error("Please complete column mapping before proceeding.")
+    else:
+        preview_left, preview_right = st.columns(2)
+        with preview_left:
+            _render_preview("Purchase Register", preview_purchase_df)
+        with preview_right:
+            _render_preview("GSTR-2B", preview_gstr2b_df)
+        if len(preview_purchase_df) < 5 or len(preview_gstr2b_df) < 5:
+            st.warning("Sample size too small for meaningful analysis.")
+
+    st.info("Click Run Reconciliation after reviewing the detected columns.")
     st.stop()
 
 try:
     purchase_df = standardize_mapped_dataframe(purchase_inspection.dataframe, purchase_mapping)
     gstr2b_df = standardize_mapped_dataframe(gstr2b_inspection.dataframe, gstr2b_mapping)
-except InputMappingError as exc:
-    st.error(str(exc))
+except InputMappingError:
+    st.error("Please complete column mapping before proceeding.")
     st.stop()
 except Exception:
     st.error("Error processing file. Please check format.")
