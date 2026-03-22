@@ -13,6 +13,7 @@ COLUMN_SYNONYMS = {
     "invoice_number": ["invoice number", "invoice no", "inv no", "bill no", "document number"],
     "invoice_date": ["invoice date", "inv date", "bill date", "date"],
     "taxable_value": ["taxable value", "taxable amount", "assessable value", "value"],
+    "vendor_name": ["tradelegal name", "supplier name", "vendor name", "party name", "name of supplier"],
 }
 
 FIELD_LABELS = {
@@ -20,6 +21,7 @@ FIELD_LABELS = {
     "invoice_number": "Invoice Number",
     "invoice_date": "Invoice Date",
     "taxable_value": "Purchase Value",
+    "vendor_name": "Supplier Name",
 }
 
 REQUIRED_MAPPING_FIELDS = ["gstin", "invoice_number", "taxable_value"]
@@ -281,6 +283,7 @@ def prepare_data(df: pd.DataFrame, mapping: Dict[str, str | None]) -> pd.DataFra
     invoice_col = mapping.get("invoice_number")
     date_col = mapping.get("invoice_date")
     amount_col = mapping.get("taxable_value")
+    vendor_col = mapping.get("vendor_name")
 
     if gstin_col in working_df.columns:
         rename_map[gstin_col] = "gstin_internal"
@@ -290,6 +293,8 @@ def prepare_data(df: pd.DataFrame, mapping: Dict[str, str | None]) -> pd.DataFra
         rename_map[date_col] = "date_internal"
     if amount_col in working_df.columns:
         rename_map[amount_col] = "amount_internal"
+    if vendor_col and vendor_col in working_df.columns:
+        rename_map[vendor_col] = "vendor_name_internal"
 
     working_df = working_df.rename(columns=rename_map).copy()
 
@@ -328,12 +333,24 @@ def prepare_data(df: pd.DataFrame, mapping: Dict[str, str | None]) -> pd.DataFra
     else:
         working_df["date_internal"] = pd.NaT
 
+    if "vendor_name_internal" in working_df.columns:
+        working_df["vendor_name_internal"] = (
+            working_df["vendor_name_internal"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+    else:
+        working_df["vendor_name_internal"] = ""
+
     standardized = pd.DataFrame(
         {
             "GSTIN": working_df["gstin_internal"],
             "Invoice Number": working_df["inv_no_internal"],
             "Invoice Date": working_df["date_internal"],
             "Purchase Value": working_df["amount_internal"],
+            "Supplier Name": working_df["vendor_name_internal"],
             "Normalized Invoice Number": working_df["norm_inv_no"],
         }
     )

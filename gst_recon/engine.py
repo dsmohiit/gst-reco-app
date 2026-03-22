@@ -334,10 +334,10 @@ def _resolve_final_vendor_name(row: pd.Series) -> str:
     status = str(row.get("Status", "") or "").strip()
 
     if status == "MISSING_IN_2B":
-        return purchase_vendor or supplier_name or gstr2b_vendor
+        return purchase_vendor or supplier_name or gstr2b_vendor or "Unknown Vendor"
     if status == "ONLY_IN_2B":
-        return gstr2b_vendor or supplier_name or purchase_vendor
-    return purchase_vendor or gstr2b_vendor or supplier_name
+        return gstr2b_vendor or supplier_name or purchase_vendor or "Unknown Vendor"
+    return purchase_vendor or gstr2b_vendor or supplier_name or "Unknown Vendor"
 
 
 def _select_best_matches(

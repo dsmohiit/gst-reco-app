@@ -32,6 +32,7 @@ DISPLAY_FIELD_LABELS = {
     "invoice_number": "Invoice Number",
     "invoice_date": "Invoice Date",
     "taxable_value": "Amount",
+    "vendor_name": "Supplier Name",
 }
 REQUIRED_MAPPING_FIELDS = {"gstin", "invoice_number", "taxable_value"}
 
@@ -193,7 +194,7 @@ def _mapping_requires_attention(inspection_result, mapping: dict[str, str | None
     for field in DISPLAY_FIELD_LABELS:
         if inspection_result.confidence.get(field) == "LOW":
             return True
-        if mapping.get(field) is None:
+        if field in REQUIRED_MAPPING_FIELDS and mapping.get(field) is None:
             return True
     return False
 
@@ -257,9 +258,14 @@ def _render_mapping_debug(dataset_title: str, inspection_result, mapping: dict[s
 
 
 def _render_preview(title: str, standardized_df: pd.DataFrame) -> None:
-    preview_columns = [column for column in ["GSTIN", "Invoice Number", "Invoice Date", "Purchase Value"] if column in standardized_df.columns]
+    preview_columns = [
+        column
+        for column in ["GSTIN", "Supplier Name", "Invoice Number", "Invoice Date", "Purchase Value"]
+        if column in standardized_df.columns
+    ]
     st.markdown(f"#### {title} Preview")
-    st.dataframe(standardized_df[preview_columns].head(), use_container_width=True, height=220)
+    preview_df = _format_date_columns(standardized_df[preview_columns].head(), ["Invoice Date"])
+    st.dataframe(preview_df, use_container_width=True, height=220)
 
 
 def _process_mapped_dataframe(df, mapping):
@@ -269,9 +275,20 @@ def _process_mapped_dataframe(df, mapping):
     standardized_df["Purchase Value"] = pd.to_numeric(standardized_df["Purchase Value"], errors="coerce").fillna(0)
     standardized_df["Invoice Number"] = standardized_df["Invoice Number"].fillna("").astype(str)
     standardized_df["GSTIN"] = standardized_df["GSTIN"].fillna("").astype(str)
+    if "Supplier Name" in standardized_df.columns:
+        standardized_df["Supplier Name"] = standardized_df["Supplier Name"].fillna("").astype(str).str.strip()
     if "source_file" in standardized_df.columns:
         standardized_df["source_file"] = standardized_df["source_file"].fillna("").astype(str)
     return standardized_df
+
+
+def _format_date_columns(df: pd.DataFrame, date_columns: list[str]) -> pd.DataFrame:
+    formatted_df = df.copy()
+    for column in date_columns:
+        if column in formatted_df.columns:
+            parsed = pd.to_datetime(formatted_df[column], errors="coerce")
+            formatted_df[column] = parsed.dt.strftime("%Y-%m-%d").fillna("-")
+    return formatted_df
 
 
 def _prepare_gstr2b_dataframe(df: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame:
@@ -512,6 +529,11 @@ vendor_summary_df = build_vendor_summary(reconciliation_df)
 vendor_scorecard_df = generate_vendor_summary(reconciliation_df)
 follow_up_df = build_follow_up_sheet(reconciliation_df)
 processing_log = reconciliation_df.attrs.get("processing_log", {})
+
+reconciliation_export_df = _format_date_columns(reconciliation_export_df, ["Purchase Date", "2B Date"])
+vendor_scorecard_df = _format_date_columns(vendor_scorecard_df, [])
+vendor_summary_df = _format_date_columns(vendor_summary_df, [])
+follow_up_df = _format_date_columns(follow_up_df, [])
 
 exception_mask = reconciliation_df["Status"] != "MATCHED"
 if only_timing_differences:
